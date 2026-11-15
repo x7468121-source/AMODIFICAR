@@ -35,48 +35,22 @@ RnNoiseAudioProcessor::RnNoiseAudioProcessor()
 RnNoiseAudioProcessor::~RnNoiseAudioProcessor() = default;
 
 //==============================================================================
-const juce::String RnNoiseAudioProcessor::getName() const {
-    return JucePlugin_Name;
-}
+const juce::String RnNoiseAudioProcessor::getName() const { return JucePlugin_Name; }
+bool RnNoiseAudioProcessor::acceptsMidi() const { return false; }
+bool RnNoiseAudioProcessor::producesMidi() const { return false; }
+double RnNoiseAudioProcessor::getTailLengthSeconds() const { return 0.0; }
 
-bool RnNoiseAudioProcessor::acceptsMidi() const {
-    return false;
-}
-
-bool RnNoiseAudioProcessor::producesMidi() const {
-    return false;
-}
-
-double RnNoiseAudioProcessor::getTailLengthSeconds() const {
-    return 0.0;
-}
-
-int RnNoiseAudioProcessor::getNumPrograms() {
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-    // so this should be at least 1, even if you're not really implementing programs.
-}
-
-int RnNoiseAudioProcessor::getCurrentProgram() {
-    return 0;
-}
-
-void RnNoiseAudioProcessor::setCurrentProgram(int index) {
-    juce::ignoreUnused(index);
-}
-
-const juce::String RnNoiseAudioProcessor::getProgramName(int index) {
-    juce::ignoreUnused(index);
-    return {};
-}
-
-void RnNoiseAudioProcessor::changeProgramName(int index, const juce::String &newName) {
-    juce::ignoreUnused(index, newName);
-}
+int RnNoiseAudioProcessor::getNumPrograms() { return 1; }
+int RnNoiseAudioProcessor::getCurrentProgram() { return 0; }
+void RnNoiseAudioProcessor::setCurrentProgram(int index) { juce::ignoreUnused(index); }
+const juce::String RnNoiseAudioProcessor::getProgramName(int index) { juce::ignoreUnused(index); return {}; }
+void RnNoiseAudioProcessor::changeProgramName(int index, const juce::String &newName) { juce::ignoreUnused(index, newName); }
 
 //==============================================================================
 void RnNoiseAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     juce::ignoreUnused(sampleRate, samplesPerBlock);
-
+    inputLevel.store(0.0f, std::memory_order_relaxed);
+    outputLevel.store(0.0f, std::memory_order_relaxed);
     m_rnNoisePlugin = std::make_shared<RnNoiseCommonPlugin>(static_cast<uint32_t>(getTotalNumInputChannels()));
     m_rnNoisePlugin->init();
 }
@@ -100,20 +74,19 @@ bool RnNoiseAudioProcessor::isBusesLayoutSupported(const BusesLayout &layouts) c
 void RnNoiseAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
                                          juce::MidiBuffer &midiMessages) {
     juce::ignoreUnused(midiMessages);
-
     juce::ScopedNoDenormals noDenormals;
 
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    const auto totalNumInputChannels = getTotalNumInputChannels();
+    const auto totalNumOutputChannels = getTotalNumOutputChannels();
+    const auto numSamples = buffer.getNumSamples();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
+        buffer.clear(i, 0, numSamples);
+
+    // Measure the input peak before RNNoise processes the block.
+    float inputPeak = 0.0f;
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+        inputPeak = juce::jmax(inputPeak, buffer.getMagnitude(channel, 0, numSamples));
 
     const float *in[8] = {nullptr};
     float *out[8] = {nullptr};
@@ -122,21 +95,28 @@ void RnNoiseAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         out[channel] = buffer.getWritePointer(channel);
     }
 
-    m_rnNoisePlugin->process(in, out, static_cast<size_t>(buffer.getNumSamples()), m_vadThresholdParam->get(),
-                             static_cast<uint32_t>(m_vadGracePeriodParam->get()),
-                             static_cast<uint32_t>(m_vadRetroactiveGracePeriodParam->get()));
+    if (m_rnNoisePlugin != nullptr) {
+        m_rnNoisePlugin->process(in, out, static_cast<size_t>(numSamples), m_vadThresholdParam->get(),
+                                 static_cast<uint32_t>(m_vadGracePeriodParam->get()),
+                                 static_cast<uint32_t>(m_vadRetroactiveGracePeriodParam->get()));
+    }
+
+    // Measure the processed output peak. These atomics are read by the UI timer.
+    float outputPeak = 0.0f;
+    for (int channel = 0; channel < totalNumOutputChannels; ++channel)
+        outputPeak = juce::jmax(outputPeak, buffer.getMagnitude(channel, 0, numSamples));
+
+    inputLevel.store(inputPeak, std::memory_order_relaxed);
+    outputLevel.store(outputPeak, std::memory_order_relaxed);
 }
 
 //==============================================================================
-bool RnNoiseAudioProcessor::hasEditor() const {
-    return true; // (change this to false if you choose to not supply an editor)
-}
+bool RnNoiseAudioProcessor::hasEditor() const { return true; }
 
 juce::AudioProcessorEditor *RnNoiseAudioProcessor::createEditor() {
     return new RnNoiseAudioProcessorEditor(*this, m_parameters);
 }
 
-//==============================================================================
 void RnNoiseAudioProcessor::getStateInformation(juce::MemoryBlock &destData) {
     auto state = m_parameters.copyState();
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
@@ -145,15 +125,12 @@ void RnNoiseAudioProcessor::getStateInformation(juce::MemoryBlock &destData) {
 
 void RnNoiseAudioProcessor::setStateInformation(const void *data, int sizeInBytes) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
-
     if (!xml || !xml->hasTagName(m_parameters.state.getType()))
         return;
-
     m_parameters.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
 //==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter() {
     return new RnNoiseAudioProcessor();
 }
