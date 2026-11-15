@@ -40,7 +40,7 @@ RnNoiseAudioProcessorEditor::RnNoiseAudioProcessorEditor(
     : AudioProcessorEditor(&p), state(vts), processor(p) {
     setSize(640, 430);
 
-    setupLabel(brand, juce::String::fromUTF8("$𝔥𝔗"), 39.0f, ink, true);
+    setupLabel(brand, juce::String::fromUTF8("$\xF0\x9D\x94\xA5\xF0\x9D\x94\x97"), 39.0f, ink, true);
     setupLabel(subtitle, "NOISE REDUCTION", 15.0f, orange, true);
     setupLabel(version, "V.2", 15.0f, red, true, juce::Justification::centred);
     setupLabel(thresholdLabel, "VOICE THRESHOLD", 11.0f, ink, true, juce::Justification::centred);
@@ -165,7 +165,7 @@ void RnNoiseAudioProcessorEditor::resized() {
     lookahead.setBounds(448, 235, 130, 112);
 
     autoButton.setBounds(getWidth() / 2 - 72, 402, 144, 22);
-    footer.setBounds(30, getHeight() - 25, getWidth() - 60, 18);
+    footer.setBounds(270, 73, getWidth() - 310, 20);
 }
 
 void RnNoiseAudioProcessorEditor::timerCallback() {
